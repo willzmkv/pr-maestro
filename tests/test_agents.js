@@ -12,6 +12,7 @@ jest.unstable_mockModule('child_process', () => ({
 // Import after mock is registered
 const { diagnoseBuild, identifyPlatform } = await import('../src/agents/maestro.js');
 const { diagnoseBuildFallback } = await import('../src/agents/opencode.js');
+const { analyzeBinary } = await import('../src/agents/rea.js');
 
 /**
  * Fake ChildProcess. Shared by every agent section below, so it lives at
@@ -560,5 +561,110 @@ describe('opencode agent - diagnoseBuildFallback', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('rea agent - analyzeBinary', () => {
+  beforeEach(() => {
+    mockSpawn.mockReset();
+  });
+
+  test('returns analysis text on successful MCP response', async () => {
+    const mcpResponse = {
+      jsonrpc: '2.0',
+      id: 1,
+      result: {
+        content: [
+          {
+            type: 'text',
+            text: 'Architecture: MIPS R4300i. Entry point: 0x80000400. Strings found: NINTENDO 64, Super Mario.',
+          },
+        ],
+      },
+    };
+
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = analyzeBinary('/tmp/disc-sample.bin');
+
+    setTimeout(() => {
+      mockProc._emit('stdout', 'data', Buffer.from(JSON.stringify(mcpResponse) + '\n'));
+      mockProc._emit('process', 'close', 0);
+    }, 10);
+
+    const result = await promise;
+    expect(typeof result).toBe('string');
+    expect(result).toContain('MIPS R4300i');
+  });
+
+  test('returns null when REA process exits with error', async () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = analyzeBinary('/tmp/disc-sample.bin');
+
+    setTimeout(() => {
+      mockProc._emit('process', 'close', 1);
+    }, 10);
+
+    const result = await promise;
+    expect(result).toBeNull();
+  });
+
+  test('returns null when MCP response contains error', async () => {
+    const mcpError = {
+      jsonrpc: '2.0',
+      id: 1,
+      error: { code: -32000, message: 'Ghidra not installed' },
+    };
+
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = analyzeBinary('/tmp/disc-sample.bin');
+
+    setTimeout(() => {
+      mockProc._emit('stdout', 'data', Buffer.from(JSON.stringify(mcpError) + '\n'));
+      mockProc._emit('process', 'close', 0);
+    }, 10);
+
+    const result = await promise;
+    expect(result).toBeNull();
+  });
+
+  test('spawns rea-mcp and calls rea_analyze_binary with binary_path after the handshake', async () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = analyzeBinary('/tmp/disc-sample.bin');
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'rea-mcp',
+      [],
+      expect.objectContaining({ stdio: ['pipe', 'pipe', 'pipe'] }),
+    );
+
+    emitJson(mockProc, { jsonrpc: '2.0', id: 0, result: { protocolVersion: '2025-06-18', capabilities: {} } });
+    const call = sentMessages(mockProc).find((m) => m.method === 'tools/call');
+    expect(call).toEqual({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'rea_analyze_binary', arguments: { binary_path: '/tmp/disc-sample.bin' } },
+    });
+
+    emitJson(mockProc, toolResult('Strings found: SEGA SEGASATURN'));
+    expect(await promise).toBe('Strings found: SEGA SEGASATURN');
+  });
+
+  test('returns null when rea-mcp is not installed', async () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = analyzeBinary('/tmp/disc-sample.bin');
+    mockProc._emit('process', 'error', spawnError('rea-mcp'));
+    mockProc._emit('process', 'close', -2);
+
+    expect(await promise).toBeNull();
   });
 });
