@@ -1,0 +1,37 @@
+[Unit]
+Description=pr-maestro AI agent bridge
+Documentation=https://github.com/willzmkv/pr-maestro
+After=network.target
+PartOf=project-r.target
+
+[Service]
+Type=simple
+User=arcade
+Group=arcade
+WorkingDirectory=/opt/project-r/pr-maestro
+# "+" runs these with full privileges: User=arcade cannot create or chown
+# directories under the root-owned /run.
+ExecStartPre=+/bin/mkdir -p /run/project-r
+ExecStartPre=+/bin/chown arcade:arcade /run/project-r
+ExecStart=/usr/bin/node /opt/project-r/pr-maestro/src/server.js
+ExecStopPost=/bin/rm -f /run/project-r/maestro.sock
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pr-maestro
+
+# Environment — override at /etc/project-r/maestro.env
+# (EnvironmentFile= values take precedence over Environment= values)
+EnvironmentFile=-/etc/project-r/maestro.env
+Environment=MAESTRO_SOCK_PATH=/run/project-r/maestro.sock
+Environment=MAESTRO_MCP_PATH=/usr/local/lib/maestro-mcp/server.py
+Environment=MAESTRO_PYTHON=python3
+Environment=REA_MCP_CMD=rea-mcp
+Environment=OPENCODE_CMD=opencode
+Environment=MAESTRO_TIMEOUT_MS=30000
+Environment=OPENCODE_TIMEOUT_MS=60000
+Environment=REA_TIMEOUT_MS=120000
+
+[Install]
+WantedBy=multi-user.target
