@@ -11,6 +11,7 @@ jest.unstable_mockModule('child_process', () => ({
 
 // Import after mock is registered
 const { diagnoseBuild, identifyPlatform } = await import('../src/agents/maestro.js');
+const { diagnoseBuildFallback } = await import('../src/agents/opencode.js');
 
 /**
  * Fake ChildProcess. Shared by every agent section below, so it lives at
@@ -417,5 +418,147 @@ describe('maestro agent - identifyPlatform', () => {
     emitJson(mockProc, toolResult(JSON.stringify({ diagnosis: 'not a platform answer' })));
 
     expect(await promise).toBeNull();
+  });
+});
+
+describe('opencode agent - diagnoseBuildFallback', () => {
+  beforeEach(() => {
+    mockSpawn.mockReset();
+  });
+
+  const buildContext = {
+    game_id: 'sm64-us',
+    stderr: 'gcc: error: missing audiofile',
+    build_log_path: '/tmp/build.log',
+  };
+
+  test('returns diagnosis when opencode outputs valid JSON', async () => {
+    const jsonOutput = JSON.stringify({
+      diagnosis: 'pkg-config audiofile not found',
+      patch: { file: 'Makefile', line: 10, before: '-laudiofile', after: '$(pkg-config --libs audiofile)' },
+      confidence: 0.72,
+    });
+
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = diagnoseBuildFallback({
+      game_id: 'sm64-us',
+      stderr: 'gcc: error: missing audiofile',
+      build_log_path: '/tmp/build.log',
+    });
+
+    setTimeout(() => {
+      mockProc._emit('stdout', 'data', Buffer.from(jsonOutput + '\n'));
+      mockProc._emit('process', 'close', 0);
+    }, 10);
+
+    const result = await promise;
+    expect(result).not.toBeNull();
+    expect(result.diagnosis).toBe('pkg-config audiofile not found');
+    expect(result.confidence).toBe(0.72);
+  });
+
+  test('returns null when opencode exits non-zero', async () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = diagnoseBuildFallback({
+      game_id: 'sm64-us',
+      stderr: 'error',
+      build_log_path: '/tmp/build.log',
+    });
+
+    setTimeout(() => {
+      mockProc._emit('process', 'close', 1);
+    }, 10);
+
+    const result = await promise;
+    expect(result).toBeNull();
+  });
+
+  test('returns null when opencode outputs non-JSON text', async () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = diagnoseBuildFallback({
+      game_id: 'sm64-us',
+      stderr: 'error',
+      build_log_path: '/tmp/build.log',
+    });
+
+    setTimeout(() => {
+      mockProc._emit('stdout', 'data', Buffer.from('I cannot determine the cause.\n'));
+      mockProc._emit('process', 'close', 0);
+    }, 10);
+
+    const result = await promise;
+    expect(result).toBeNull();
+  });
+
+  test('runs `opencode run <prompt>` with the prompt as a single positional argument', () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    diagnoseBuildFallback(buildContext);
+    mockProc._emit('process', 'close', 1);
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    const [command, args, options] = mockSpawn.mock.calls[0];
+    expect(command).toBe('opencode');
+    expect(args).toHaveLength(2);
+    expect(args[0]).toBe('run');
+    expect(args[1]).toContain('gcc: error: missing audiofile');
+    expect(options).toEqual(expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }));
+  });
+
+  test('extracts JSON surrounded by prose and fences', async () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = diagnoseBuildFallback(buildContext);
+    mockProc._emit('stdout', 'data', Buffer.from('Sure!\n```json\n{"diagnosis": "x", "patch": null,'));
+    mockProc._emit('stdout', 'data', Buffer.from(' "confidence": 0.3}\n```\n'));
+    mockProc._emit('process', 'close', 0);
+
+    expect(await promise).toEqual({ diagnosis: 'x', patch: null, confidence: 0.3 });
+  });
+
+  test('returns null when the JSON has no diagnosis string', async () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = diagnoseBuildFallback(buildContext);
+    mockProc._emit('stdout', 'data', Buffer.from('{"error": "rate limited"}\n'));
+    mockProc._emit('process', 'close', 0);
+
+    expect(await promise).toBeNull();
+  });
+
+  test('returns null when the opencode binary is missing', async () => {
+    const mockProc = makeMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+
+    const promise = diagnoseBuildFallback(buildContext);
+    mockProc._emit('process', 'error', spawnError('opencode'));
+    mockProc._emit('process', 'close', -2);
+
+    expect(await promise).toBeNull();
+  });
+
+  test('returns null and kills opencode when it does not finish in time', async () => {
+    jest.useFakeTimers();
+    try {
+      const mockProc = makeMockProcess();
+      mockSpawn.mockReturnValue(mockProc);
+
+      const promise = diagnoseBuildFallback(buildContext);
+      jest.advanceTimersByTime(60000);
+
+      expect(await promise).toBeNull();
+      expect(mockProc.kill).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
